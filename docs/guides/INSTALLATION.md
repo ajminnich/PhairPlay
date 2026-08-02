@@ -74,26 +74,22 @@ cd PhairPlay
 # Build for Google TV
 ./gradlew assembleGoogletvRelease
 
-# Build for Google TV with a registered Cast App ID
-./gradlew assembleGoogletvRelease -Pphairplay.castAppId=<APP_ID>
-
 # Build for Fire TV
 ./gradlew assembleFiretvRelease
 ```
 
 APKs are in `app/build/outputs/apk/`.
 
-Google Cast requires a registered Cast App ID for real testing. See
-[Google Cast App ID](CAST_APP_ID.md) before testing Cast on Google TV.
-
 ---
 
 ## After Installation
 
-1. Launch PhairPlay — the **HomeScreen** appears showing three service cards
-2. All services (AirPlay, Miracast, Cast) are enabled by default
+1. Launch PhairPlay — the **HomeScreen** appears showing AirPlay and Miracast service cards
+2. Both PhairPlay services are enabled by default
 3. On your Mac: click the AirPlay icon → select your TV
 4. On Windows: Settings → Display → Connect to wireless display → select your TV
-5. In Chrome: Menu → Cast → select your TV
+
+Google TV's built-in Chromecast receiver remains available independently; PhairPlay does not
+configure, replace, or disable that system feature.
 
 See [Troubleshooting](TROUBLESHOOTING.md) if the device doesn't appear in your sender's list.

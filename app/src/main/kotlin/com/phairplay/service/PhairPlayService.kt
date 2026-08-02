@@ -15,7 +15,6 @@ import com.phairplay.MainActivity
 import com.phairplay.R
 import android.view.Surface
 import com.phairplay.airplay.AirPlayReceiver
-import com.phairplay.cast.CastReceiver
 import com.phairplay.miracast.MiracastReceiver
 import com.phairplay.settings.AppSettings
 import com.phairplay.settings.SettingsRepository
@@ -33,7 +32,7 @@ import kotlinx.coroutines.launch
 /**
  * PhairPlayService — Android ForegroundService that hosts all receiver protocols.
  *
- * WHY: The AirPlay/Miracast/Cast receivers need to run continuously in the background.
+ * WHY: The AirPlay and Miracast receivers need to run continuously in the background.
  * Android may kill background processes. A ForegroundService with a persistent
  * notification keeps the app alive and shows the user that PhairPlay is active.
  *
@@ -68,9 +67,6 @@ class PhairPlayService : Service() {
     private val _miracastState = MutableStateFlow(ProtocolState.DISABLED)
     val miracastState: StateFlow<ProtocolState> = _miracastState.asStateFlow()
 
-    private val _castState = MutableStateFlow(ProtocolState.DISABLED)
-    val castState: StateFlow<ProtocolState> = _castState.asStateFlow()
-
     private val _activeConnection = MutableStateFlow<ActiveConnection?>(null)
     val activeConnection: StateFlow<ActiveConnection?> = _activeConnection.asStateFlow()
 
@@ -93,7 +89,6 @@ class PhairPlayService : Service() {
     // Receiver instances — null when not running
     private var airPlayReceiver: AirPlayReceiver? = null
     private var miracastReceiver: MiracastReceiver? = null
-    private var castReceiver: CastReceiver? = null
 
     // Settings — read once when starting, re-read on restart
     private lateinit var settingsRepository: SettingsRepository
@@ -173,19 +168,18 @@ class PhairPlayService : Service() {
     /**
      * Starts all receivers that are enabled in Settings.
      *
-     * Reads current settings, then starts AirPlay, Miracast, and/or Cast
+     * Reads current settings, then starts AirPlay and/or Miracast
      * receivers according to the enabled flags.
      */
     private suspend fun startReceivers() {
         val settings = settingsRepository.settingsFlow.first()
-        Logger.i("Starting receivers: AirPlay=${settings.airPlayEnabled}, Miracast=${settings.miracastEnabled}, Cast=${settings.castEnabled}")
+        Logger.i("Starting receivers: AirPlay=${settings.airPlayEnabled}, Miracast=${settings.miracastEnabled}")
 
         _serviceState.value = ServiceState.Running
         updateNotification(isRunning = true)
 
         if (settings.airPlayEnabled)   startAirPlay(settings)
         if (settings.miracastEnabled)  startMiracast()
-        if (settings.castEnabled)      startCast()
     }
 
     /**
@@ -227,6 +221,7 @@ class PhairPlayService : Service() {
      *
      * @param settings Current app settings; read once per start/restart cycle.
      */
+    @Synchronized
     private fun startAirPlay(settings: AppSettings) {
         // Mirror the debug-overlay setting into the shared stats bus that StreamingScreen reads.
         com.phairplay.airplay.StreamStats.overlayEnabled = settings.showDebugOverlay
@@ -239,6 +234,11 @@ class PhairPlayService : Service() {
             Logger.i("AirPlay receiver already running — skipping duplicate start")
             return
         }
+
+        // AirPlay startup is asynchronous: NsdManager reports successful registration later.
+        // Move the card out of its initial DISABLED state immediately, matching the other enabled
+        // protocols and avoiding a false "Enable in Settings" message during registration.
+        _airPlayState.value = ProtocolState.ADVERTISING
         // Captures the sender name reported by AirPlayReceiver before CONNECTED fires.
         // onSenderNameChanged is called synchronously before emitState(CONNECTED), so
         // this assignment happens-before the Main-thread read in onStateChanged.
@@ -295,7 +295,12 @@ class PhairPlayService : Service() {
         Logger.d("AirPlay receiver started (displayName='${settings.effectiveDisplayName}')")
     }
 
+    @Synchronized
     private fun startMiracast() {
+        if (miracastReceiver != null) {
+            Logger.i("Miracast receiver already running — skipping duplicate start")
+            return
+        }
         _miracastState.value = ProtocolState.ADVERTISING
         miracastReceiver = MiracastReceiver(
             context = applicationContext,
@@ -304,25 +309,14 @@ class PhairPlayService : Service() {
         Logger.d("Miracast receiver started")
     }
 
-    private fun startCast() {
-        _castState.value = ProtocolState.ADVERTISING
-        castReceiver = CastReceiver(
-            context = applicationContext,
-            onStateChanged = { state -> _castState.value = state }
-        ).also { it.start() }
-        Logger.d("Cast receiver started")
-    }
-
+    @Synchronized
     private fun stopAllReceiversInternal() {
         try { airPlayReceiver?.stop() } catch (e: Exception) { Logger.e("AirPlay stop error", e) }
         try { miracastReceiver?.stop() } catch (e: Exception) { Logger.e("Miracast stop error", e) }
-        try { castReceiver?.stop() } catch (e: Exception) { Logger.e("Cast stop error", e) }
         airPlayReceiver = null
         miracastReceiver = null
-        castReceiver = null
         _airPlayState.value = ProtocolState.DISABLED
         _miracastState.value = ProtocolState.DISABLED
-        _castState.value = ProtocolState.DISABLED
         _photoFrame.value = null
         _nowPlaying.value = null
         _pairingPin.value = null

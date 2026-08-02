@@ -1,4 +1,8 @@
-# PhairPlay – Project Plan
+# PhairPlay — Project Plan
+
+> **Scope update (2026-08-01):** PhairPlay's custom Google Cast receiver was removed. Google TV's
+> built-in Chromecast receiver remains independent of this app. Cast-related roadmap material
+> below is retained only as historical planning and is no longer active scope.
 
 Version: 2.1
 Status: Active

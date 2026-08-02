@@ -1,65 +1,40 @@
 package com.phairplay.miracast
 
 import android.content.Context
-import android.content.pm.PackageManager
 import android.net.wifi.p2p.WifiP2pManager
-import android.net.wifi.p2p.nsd.WifiP2pDnsSdServiceInfo
-import android.os.Looper
 import com.phairplay.airplay.RtspRequest
 import com.phairplay.service.ProtocolState
 import io.mockk.every
 import io.mockk.mockk
-import io.mockk.slot
 import io.mockk.verify
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * MiracastReceiverTest — verifies Wi-Fi Direct service advertisement behavior.
+ * MiracastReceiverTest — verifies honest fail-closed behavior and RTSP groundwork.
  */
 class MiracastReceiverTest {
 
     @Test
-    fun `start advertises WFD service and emits advertising state`() {
-        val context = mockk<Context>()
+    fun `start does not present DNS-SD groundwork as a functional Miracast receiver`() {
+        val context = mockk<Context>(relaxed = true)
         val manager = mockk<WifiP2pManager>(relaxed = true)
-        val channel = mockk<WifiP2pManager.Channel>(relaxed = true)
-        val actionListener = slot<WifiP2pManager.ActionListener>()
         val states = mutableListOf<ProtocolState>()
 
         every { context.getSystemService(Context.WIFI_P2P_SERVICE) } returns manager
-        every { context.mainLooper } returns Looper.getMainLooper()
-        every { context.checkSelfPermission("android.permission.NEARBY_WIFI_DEVICES") } returns
-            PackageManager.PERMISSION_GRANTED
-        every { context.checkSelfPermission("android.permission.ACCESS_FINE_LOCATION") } returns
-            PackageManager.PERMISSION_DENIED
-        every { manager.initialize(eq(context), any(), any()) } returns channel
-        every {
-            manager.addLocalService(
-                eq(channel),
-                any<WifiP2pDnsSdServiceInfo>(),
-                capture(actionListener)
-            )
-        } answers {
-            actionListener.captured.onSuccess()
-            Unit
-        }
 
         MiracastReceiver(context) { states.add(it) }.start()
 
-        verify(exactly = 1) {
-            manager.addLocalService(eq(channel), any<WifiP2pDnsSdServiceInfo>(), any())
-        }
-        assertEquals(ProtocolState.ADVERTISING, states.last())
+        verify(exactly = 0) { manager.initialize(any(), any(), any()) }
+        verify(exactly = 0) { manager.addLocalService(any(), any(), any()) }
+        assertEquals(listOf(ProtocolState.ERROR), states)
     }
 
     @Test
-    fun `start emits error when WifiP2pManager is unavailable`() {
-        val context = mockk<Context>()
+    fun `start emits error even when WifiP2pManager is unavailable`() {
+        val context = mockk<Context>(relaxed = true)
         val states = mutableListOf<ProtocolState>()
-
-        every { context.getSystemService(Context.WIFI_P2P_SERVICE) } returns null
 
         MiracastReceiver(context) { states.add(it) }.start()
 

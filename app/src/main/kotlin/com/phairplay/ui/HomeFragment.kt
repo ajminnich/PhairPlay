@@ -4,7 +4,6 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
-import android.graphics.Color
 import android.os.Bundle
 import android.os.IBinder
 import android.view.LayoutInflater
@@ -29,7 +28,7 @@ import kotlinx.coroutines.launch
 /**
  * HomeFragment — The main screen of PhairPlay.
  *
- * WHY: Shows the status of all three receiver protocols (AirPlay / Miracast / Cast)
+ * WHY: Shows the status of both receiver protocols (AirPlay / Miracast)
  * and provides Start / Stop / Restart controls. Designed for TV: large cards,
  * D-pad navigable, Google TV Streamer design language.
  *
@@ -65,7 +64,6 @@ class HomeFragment : Fragment() {
     private lateinit var dotServiceState: View
     private lateinit var cardAirPlay: View
     private lateinit var cardMiracast: View
-    private lateinit var cardCast: View
     private lateinit var btnStart: Button
     private lateinit var btnStop: Button
     private lateinit var btnRestart: Button
@@ -104,7 +102,6 @@ class HomeFragment : Fragment() {
         dotServiceState  = view.findViewById(R.id.dot_service_state)
         cardAirPlay      = view.findViewById(R.id.card_airplay)
         cardMiracast     = view.findViewById(R.id.card_miracast)
-        cardCast         = view.findViewById(R.id.card_cast)
         btnStart         = view.findViewById(R.id.btn_start)
         btnStop          = view.findViewById(R.id.btn_stop)
         btnRestart       = view.findViewById(R.id.btn_restart)
@@ -117,7 +114,6 @@ class HomeFragment : Fragment() {
     private fun configureProtocolCards() {
         setupCard(cardAirPlay,   R.drawable.ic_airplay,  R.string.protocol_airplay)
         setupCard(cardMiracast,  R.drawable.ic_miracast, R.string.protocol_miracast)
-        setupCard(cardCast,      R.drawable.ic_cast,     R.string.protocol_cast)
     }
 
     private fun setupCard(card: View, iconRes: Int, nameRes: Int) {
@@ -167,13 +163,14 @@ class HomeFragment : Fragment() {
             svc.serviceState.collectLatest { state -> updateServiceStateBadge(state) }
         }
         viewLifecycleOwner.lifecycleScope.launch {
-            svc.airPlayState.collectLatest { state -> updateProtocolCard(cardAirPlay, state) }
+            svc.airPlayState.collectLatest { state ->
+                updateProtocolCard(cardAirPlay, Protocol.AIRPLAY, state)
+            }
         }
         viewLifecycleOwner.lifecycleScope.launch {
-            svc.miracastState.collectLatest { state -> updateProtocolCard(cardMiracast, state) }
-        }
-        viewLifecycleOwner.lifecycleScope.launch {
-            svc.castState.collectLatest { state -> updateProtocolCard(cardCast, state) }
+            svc.miracastState.collectLatest { state ->
+                updateProtocolCard(cardMiracast, Protocol.MIRACAST, state)
+            }
         }
     }
 
@@ -195,10 +192,11 @@ class HomeFragment : Fragment() {
     /**
      * Updates a single protocol status card with the current [ProtocolState].
      *
-     * @param card      The card root view (cardAirPlay, cardMiracast, or cardCast).
+     * @param card      The card root view (cardAirPlay or cardMiracast).
+     * @param protocol  The protocol represented by this card.
      * @param state     The current state of this protocol.
      */
-    private fun updateProtocolCard(card: View, state: ProtocolState) {
+    private fun updateProtocolCard(card: View, protocol: Protocol, state: ProtocolState) {
         val dot    = card.findViewById<View>(R.id.dot_protocol_status)
         val stateText = card.findViewById<TextView>(R.id.text_protocol_state)
         val detail = card.findViewById<TextView>(R.id.text_protocol_detail)
@@ -207,11 +205,21 @@ class HomeFragment : Fragment() {
             ProtocolState.DISABLED    -> Triple(R.string.protocol_state_disabled,    R.color.status_disabled,  R.string.protocol_detail_disabled)
             ProtocolState.ADVERTISING -> Triple(R.string.protocol_state_advertising, R.color.status_running,   R.string.protocol_detail_waiting)
             ProtocolState.CONNECTED   -> Triple(R.string.protocol_state_connected,   R.color.status_running,   R.string.protocol_detail_connected)
-            ProtocolState.ERROR       -> Triple(R.string.protocol_state_error,       R.color.status_stopped,   R.string.protocol_detail_error)
+            ProtocolState.ERROR       -> Triple(
+                R.string.protocol_state_error,
+                R.color.status_stopped,
+                protocolErrorDetail(protocol)
+            )
         }
 
         stateText.setText(stateRes)
         detail.setText(detailRes)
         dot.background.setTint(requireContext().getColor(colorRes))
+    }
+
+    /** Returns an actionable error detail instead of blaming every failure on Wi-Fi. */
+    private fun protocolErrorDetail(protocol: Protocol): Int = when (protocol) {
+        Protocol.AIRPLAY -> R.string.protocol_detail_airplay_error
+        Protocol.MIRACAST -> R.string.protocol_detail_miracast_error
     }
 }

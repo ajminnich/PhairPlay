@@ -7,6 +7,15 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import com.phairplay.airplay.handshake.PlistCodec
+import java.io.IOException
+import java.net.ServerSocket
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 
 /**
  * RtspHandlerTest — Unit tests for the RTSP protocol implementation.
@@ -72,6 +81,88 @@ class RtspHandlerTest {
         assertTrue("SETUP missing", "SETUP" in publicMethods)
         assertTrue("RECORD missing", "RECORD" in publicMethods)
         assertTrue("TEARDOWN missing", "TEARDOWN" in publicMethods)
+    }
+
+    // GET /info
+
+    @Test
+    fun `GET info qualifier keeps HTTP protocol and returns binary TXT data`() {
+        val qualifierBody = PlistCodec.encode(mapOf("qualifier" to listOf("txtRAOP")))
+
+        val response = createTestHandler().handleInfoPublic(
+            RtspRequest(
+                method = "GET",
+                uri = "/info",
+                headers = mapOf("Content-Type" to "application/x-apple-binary-plist"),
+                body = "",
+                bodyBytes = qualifierBody,
+                protocol = "HTTP/1.1"
+            )
+        )
+
+        assertEquals(200, response.statusCode)
+        assertEquals("HTTP/1.1", response.protocol)
+        assertEquals("application/x-apple-binary-plist", response.contentType)
+        assertNotNull(response.bodyBytes)
+        val decoded = PlistCodec.decode(response.bodyBytes!!)
+        assertEquals(setOf("txtRAOP"), decoded.keys)
+        assertTrue(decoded["txtRAOP"] is ByteArray)
+    }
+
+    // RTSP startup lifecycle
+
+    @Test
+    fun `start returns only after RTSP socket binds`() = runBlocking {
+        val socket = ServerSocket(0)
+        var bindCompleted = false
+        val handler = createBindTestHandler {
+            bindCompleted = true
+            socket
+        }
+
+        handler.start(this)
+
+        assertTrue("start must not return before bind completes", bindCompleted)
+        assertFalse("bound socket must remain open for the accept loop", socket.isClosed)
+        handler.stop()
+        assertTrue("stop must close the bound socket", socket.isClosed)
+    }
+
+    @Test
+    fun `start propagates bind IOException`() {
+        val handler = createBindTestHandler { throw IOException("port unavailable") }
+        var failure: Throwable? = null
+
+        runBlocking {
+            failure = runCatching { handler.start(this) }.exceptionOrNull()
+        }
+
+        assertTrue("bind failure must reach the startup caller", failure is IOException)
+    }
+
+    @Test
+    fun `stop during startup does not leak newly bound socket`() = runBlocking {
+        val enteredBind = CountDownLatch(1)
+        val releaseBind = CountDownLatch(1)
+        val socket = ServerSocket(0)
+        val failure = AtomicReference<Throwable?>()
+        val handler = createBindTestHandler {
+            enteredBind.countDown()
+            assertTrue("test bind was not released", releaseBind.await(2, TimeUnit.SECONDS))
+            socket
+        }
+
+        val startup = launch(Dispatchers.Default) {
+            failure.set(runCatching { handler.start(this) }.exceptionOrNull())
+        }
+        assertTrue("startup never entered bind", enteredBind.await(2, TimeUnit.SECONDS))
+
+        handler.stop()
+        releaseBind.countDown()
+        joinAll(startup)
+
+        assertTrue("socket returned after stop must be closed", socket.isClosed)
+        assertTrue("stopped startup must fail instead of publishing the socket", failure.get() is IOException)
     }
 
     // ─── ANNOUNCE ────────────────────────────────────────────────────────────
@@ -336,6 +427,16 @@ class RtspHandlerTest {
         onMirrorVideoStop = { videoStopped = true }
     )
 
+    private fun createBindTestHandler(bind: () -> ServerSocket): RtspHandler =
+        object : RtspHandler(
+            context = io.mockk.mockk(relaxed = true),
+            videoSurfaceProvider = { null },
+            onStreamingStarted = {},
+            onStreamingStopped = {}
+        ) {
+            override fun bindRtspSocket(): ServerSocket = bind()
+        }
+
     /** Binary-plist TEARDOWN body naming the given stream types, e.g. `{streams:[{type:96}]}`. */
     private fun teardownBody(vararg streamTypes: Int): ByteArray =
         PlistCodec.encode(mapOf("streams" to streamTypes.map { mapOf("type" to it.toLong()) }))
@@ -402,6 +503,7 @@ class TestableRtspHandler(
     fun seedActiveStreams(vararg types: Int) { activeStreamTypes.addAll(types.toList()) }
 
     fun handleOptionsPublic(req: RtspRequest) = handleOptionsInternal(req)
+    fun handleInfoPublic(req: RtspRequest) = handleInfoInternal(req)
     fun handleAnnouncePublic(req: RtspRequest) = handleAnnounceInternal(req)
     fun handleSetupPublic(req: RtspRequest) = handleSetupInternal(req)
     fun handleRecordPublic(req: RtspRequest) = handleRecordInternal(req)

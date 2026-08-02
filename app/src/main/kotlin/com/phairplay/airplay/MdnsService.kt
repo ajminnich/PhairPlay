@@ -3,9 +3,16 @@ package com.phairplay.airplay
 import android.content.Context
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
+import android.net.wifi.WifiManager
 import com.phairplay.service.ProtocolState
 import com.phairplay.util.Logger
 import com.phairplay.util.NetworkUtils
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /**
  * MdnsService — Advertises PhairPlay as an AirPlay 2 receiver on the local network.
@@ -49,7 +56,9 @@ class MdnsService(
      * Only the `_airplay._tcp` service name is reported (not the `_raop._tcp` name,
      * which has a MAC address prefix and is not shown to users).
      */
-    private val onActualNameRegistered: (String) -> Unit = {}
+    private val onActualNameRegistered: (String) -> Unit = {},
+    /** Override with 0 in deterministic unit tests to disable the real-time watchdog. */
+    private val registrationTimeoutMs: Long = REGISTRATION_TIMEOUT_MS
 ) {
 
     // Android's built-in mDNS manager — handles multicast registration
@@ -60,10 +69,25 @@ class MdnsService(
     private var airPlayListener: NsdManager.RegistrationListener? = null
     private var raopListener: NsdManager.RegistrationListener? = null
 
-    // Count of how many services have confirmed registration.
-    // Only when both reach 2 do we emit ProtocolState.ADVERTISING.
-    @Volatile
-    private var registeredCount = 0
+    // Keep Wi-Fi multicast reception enabled for the lifetime of the advertisement. Android's
+    // NSD implementation needs this on older platform releases and when the foreground service is
+    // running while the Activity is backgrounded. The manifest already grants
+    // CHANGE_WIFI_MULTICAST_STATE; Ethernet-only devices simply have no useful lock to acquire.
+    private var multicastLock: WifiManager.MulticastLock? = null
+
+    // Android's NSD advertiser on the onn TV completes only the second of two back-to-back
+    // registration operations. Submit ancillary RAOP first so essential AirPlay is second, and
+    // track their callbacks independently because only AirPlay controls receiver readiness.
+    @Volatile private var airPlayRegistered = false
+    @Volatile private var raopRegistered = false
+
+    // Every start gets a distinct generation. Android can deliver an NSD callback after its
+    // listener was unregistered; without this token, an old AirPlay success could advertise a
+    // newer start (or an old failure could tear the newer registration down).
+    private var registrationGeneration = 0L
+
+    private val timeoutScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private var registrationTimeoutJob: Job? = null
 
     // Guard against double-start
     @Volatile
@@ -85,20 +109,43 @@ class MdnsService(
      * @param displayNameOverride User-configured display name from Settings.
      *   Pass `null` or blank to use the Android system device name.
      */
+    @Synchronized
     fun start(displayNameOverride: String? = null) {
         if (isStarted) {
             Logger.w("MdnsService.start() called but already registered — ignoring")
             return
         }
         isStarted = true
-        registeredCount = 0
+        registrationGeneration++
+        val generation = registrationGeneration
+        airPlayRegistered = false
+        raopRegistered = false
 
         val effectiveName = resolveDisplayName(displayNameOverride)
-        Logger.i("Starting mDNS advertising as '$effectiveName'")
-        requestedName = effectiveName
+        val airPlayServiceName = resolveAirPlayServiceName(effectiveName)
+        Logger.i("Starting mDNS advertising as '$airPlayServiceName'")
+        requestedName = airPlayServiceName
 
-        registerAirPlayService(effectiveName)
-        registerRaopService(effectiveName)
+        acquireMulticastLock()
+
+        // The working reference receiver submits RAOP first and AirPlay second. Preserve that
+        // ordering so the onn NSD daemon's second completed request is the picker-visible one.
+        // RAOP is ancillary: a synchronous vendor failure must not suppress AirPlay submission.
+        try {
+            registerRaopService(effectiveName, generation)
+        } catch (e: Exception) {
+            Logger.e("Failed to submit ancillary RAOP mDNS registration; continuing", e)
+        }
+
+        try {
+            scheduleRegistrationTimeout(generation, "_airplay._tcp") { airPlayRegistered }
+            registerAirPlayService(airPlayServiceName, generation)
+        } catch (e: Exception) {
+            // A synchronous NsdManager failure must not leak the multicast lock or a partially
+            // registered service. Let AirPlayReceiver's startup guard report the ERROR state.
+            stopInternal(notifyDisabled = false)
+            throw e
+        }
     }
 
     /**
@@ -109,21 +156,28 @@ class MdnsService(
      *
      * Safe to call even if [start] was never called.
      */
+    @Synchronized
     fun stop() {
+        stopInternal(notifyDisabled = true)
+    }
+
+    /** Performs teardown, optionally reporting a user-visible disabled state. */
+    @Synchronized
+    private fun stopInternal(notifyDisabled: Boolean) {
         Logger.i("Stopping mDNS advertising")
-        try {
-            airPlayListener?.let { nsdManager.unregisterService(it) }
-            raopListener?.let { nsdManager.unregisterService(it) }
-        } catch (e: Exception) {
-            // Unregistration errors are non-fatal: service will expire via mDNS TTL
-            Logger.e("Error unregistering mDNS services (non-fatal)", e)
-        } finally {
-            airPlayListener = null
-            raopListener = null
-            registeredCount = 0
-            isStarted = false
-            onStateChange(ProtocolState.DISABLED)
-        }
+        // Unregister independently: one stale/failed listener must not prevent the other service
+        // from being torn down during restart.
+        airPlayListener?.let { unregisterSafely(it, "_airplay._tcp") }
+        raopListener?.let { unregisterSafely(it, "_raop._tcp") }
+        airPlayListener = null
+        raopListener = null
+        airPlayRegistered = false
+        raopRegistered = false
+        isStarted = false
+        registrationTimeoutJob?.cancel()
+        registrationTimeoutJob = null
+        releaseMulticastLock()
+        if (notifyDisabled) onStateChange(ProtocolState.DISABLED)
     }
 
     /**
@@ -134,9 +188,12 @@ class MdnsService(
      *
      * @param displayNameOverride Updated display name, if changed in Settings.
      */
+    @Synchronized
     fun restart(displayNameOverride: String? = null) {
         Logger.d("Restarting mDNS advertising")
-        stop()
+        // This is an internal re-advertisement while AirPlay remains enabled. Emitting DISABLED
+        // here makes the Home card incorrectly say "Enable in Settings" between registrations.
+        stopInternal(notifyDisabled = false)
         start(displayNameOverride)
     }
 
@@ -152,6 +209,95 @@ class MdnsService(
     }
 
     /**
+     * Avoids a cross-service instance-name collision in Android TV's Java mDNS backend.
+     *
+     * The onn firmware advertises its built-in `_androidtvremote2._tcp` service using the system
+     * device name. Its mDNS implementation incorrectly rejects another local service with that
+     * same instance name even when the service type differs, leaving AirPlay without a callback.
+     * A user-supplied distinct name is preserved; the system-default name gets an AirPlay suffix.
+     */
+    private fun resolveAirPlayServiceName(baseName: String): String {
+        val systemName = NetworkUtils.getDeviceName(context)
+        if (!baseName.equals(systemName, ignoreCase = true)) return baseName
+
+        val suffix = AIRPLAY_NAME_SUFFIX
+        val maxBaseCharacters = (MAX_MDNS_LABEL_CHARACTERS - suffix.length).coerceAtLeast(1)
+        return baseName.take(maxBaseCharacters).trimEnd() + suffix
+    }
+
+    /** Acquires one non-reference-counted multicast lock for this advertisement lifecycle. */
+    private fun acquireMulticastLock() {
+        if (multicastLock != null) return
+
+        try {
+            val wifiManager = context.applicationContext
+                .getSystemService(Context.WIFI_SERVICE) as? WifiManager
+            val lock = wifiManager?.createMulticastLock(MULTICAST_LOCK_TAG) ?: return
+            lock.setReferenceCounted(false)
+            lock.acquire()
+            multicastLock = lock
+            Logger.d("mDNS multicast lock acquired")
+        } catch (e: Exception) {
+            // Some Ethernet-only and vendor Android TV builds reject Wi-Fi lock operations even
+            // with the manifest permission. NsdManager may still work, so log and continue.
+            multicastLock = null
+            Logger.e("Could not acquire mDNS multicast lock", e)
+        }
+    }
+
+    /** Releases the multicast lock exactly once; safe after partial startup or repeated stop. */
+    private fun releaseMulticastLock() {
+        val lock = multicastLock ?: return
+        multicastLock = null
+        try {
+            if (lock.isHeld) lock.release()
+            Logger.d("mDNS multicast lock released")
+        } catch (e: Exception) {
+            Logger.e("Could not release mDNS multicast lock", e)
+        }
+    }
+
+    private fun unregisterSafely(
+        listener: NsdManager.RegistrationListener,
+        serviceLabel: String
+    ) {
+        try {
+            nsdManager.unregisterService(listener)
+        } catch (e: Exception) {
+            // Non-fatal: the service will expire via its mDNS TTL.
+            Logger.e("Error unregistering mDNS $serviceLabel service (non-fatal)", e)
+        }
+    }
+
+    /**
+     * Fails essential AirPlay registration when Android NSD produces neither callback.
+     *
+     * The first RAOP request is ancillary and intentionally has no fatal watchdog. This watchdog
+     * belongs to the second, picker-visible AirPlay request so callback loss remains visible and
+     * recoverable without making RAOP a readiness requirement.
+     */
+    private fun scheduleRegistrationTimeout(
+        generation: Long,
+        serviceLabel: String,
+        isRegistered: () -> Boolean
+    ) {
+        registrationTimeoutJob?.cancel()
+        if (registrationTimeoutMs <= 0L) return
+
+        registrationTimeoutJob = timeoutScope.launch {
+            delay(registrationTimeoutMs)
+            synchronized(this@MdnsService) {
+                if (!isStarted || generation != registrationGeneration || isRegistered()) {
+                    return@synchronized
+                }
+                Logger.e("mDNS registration timed out for $serviceLabel")
+                stopInternal(notifyDisabled = false)
+                onStateChange(ProtocolState.ERROR)
+            }
+        }
+    }
+
+    /**
      * Registers the `_airplay._tcp` mDNS service.
      *
      * TXT records tell senders what features PhairPlay supports.
@@ -159,14 +305,14 @@ class MdnsService(
      *
      * @param displayName The name shown in sender AirPlay pickers.
      */
-    private fun registerAirPlayService(displayName: String) {
+    private fun registerAirPlayService(displayName: String, generation: Long) {
         val serviceInfo = NsdServiceInfo().apply {
             serviceName = displayName
             serviceType = SERVICE_TYPE_AIRPLAY
             port = AIRPLAY_PORT
 
             // Core identity TXT records
-            setAttribute("deviceid", NetworkUtils.getMacAddress())
+            setAttribute("deviceid", NetworkUtils.getMacAddress(context))
             setAttribute("features", AIRPLAY_FEATURES)
             setAttribute("model", AIRPLAY_MODEL)
             setAttribute("srcvers", AIRPLAY_SERVER_VERSION)
@@ -176,6 +322,7 @@ class MdnsService(
         }
 
         airPlayListener = createRegistrationListener(
+            generation = generation,
             serviceLabel = "_airplay._tcp",
             onRegisteredName = { actualName ->
                 // Detect collision auto-renaming: NsdManager appended " (2)", " (3)", etc.
@@ -185,9 +332,10 @@ class MdnsService(
                 }
                 onActualNameRegistered(actualName)
             },
-            onSuccess = { incrementAndCheckBothRegistered() },
-            onFailure = { onStateChange(ProtocolState.ERROR) }
+            onSuccess = { onAirPlayRegistered(generation) },
+            onFailure = { errorCode -> onAirPlayRegistrationFailed(generation, errorCode) }
         )
+        Logger.d("Submitting mDNS registration: _airplay._tcp")
         nsdManager.registerService(serviceInfo, NsdManager.PROTOCOL_DNS_SD, airPlayListener!!)
     }
 
@@ -203,8 +351,8 @@ class MdnsService(
      *
      * @param displayName The device name portion of the RAOP service name.
      */
-    private fun registerRaopService(displayName: String) {
-        val macHex = NetworkUtils.getMacAddress().replace(":", "").uppercase()
+    private fun registerRaopService(displayName: String, generation: Long) {
+        val macHex = NetworkUtils.getMacAddress(context).replace(":", "").uppercase()
 
         val serviceInfo = NsdServiceInfo().apply {
             serviceName = "$macHex@$displayName"  // required RAOP format
@@ -223,25 +371,52 @@ class MdnsService(
         }
 
         raopListener = createRegistrationListener(
+            generation = generation,
             serviceLabel = "_raop._tcp",
             onRegisteredName = null,  // RAOP name has MAC prefix — not shown to users
-            onSuccess = { incrementAndCheckBothRegistered() },
-            onFailure = { onStateChange(ProtocolState.ERROR) }
+            onSuccess = { onRaopRegistered(generation) },
+            onFailure = { errorCode -> onRaopRegistrationFailed(generation, errorCode) }
         )
+        Logger.d("Submitting mDNS registration: _raop._tcp")
         nsdManager.registerService(serviceInfo, NsdManager.PROTOCOL_DNS_SD, raopListener!!)
     }
 
     /**
-     * Emits [ProtocolState.ADVERTISING] only after both services have confirmed registration.
-     * This prevents a brief "advertising" state where only one of the two required services
-     * is live.
+     * Marks the receiver ready when the essential AirPlay advertisement succeeds. RAOP is useful
+     * for audio senders but is intentionally not a readiness gate: the onn NSD daemon may leave the
+     * first back-to-back request pending while successfully advertising the second (AirPlay) one.
      */
     @Synchronized
-    private fun incrementAndCheckBothRegistered() {
-        registeredCount++
-        if (registeredCount >= 2) {
-            onStateChange(ProtocolState.ADVERTISING)
-        }
+    private fun onAirPlayRegistered(generation: Long) {
+        if (!isStarted || generation != registrationGeneration || airPlayRegistered) return
+        airPlayRegistered = true
+        registrationTimeoutJob?.cancel()
+        registrationTimeoutJob = null
+        onStateChange(ProtocolState.ADVERTISING)
+    }
+
+    /** Records ancillary RAOP success without changing AirPlay's user-visible state. */
+    @Synchronized
+    private fun onRaopRegistered(generation: Long) {
+        if (!isStarted || generation != registrationGeneration || raopRegistered) return
+        raopRegistered = true
+    }
+
+    /** AirPlay registration failure is fatal because the receiver cannot appear in pickers. */
+    @Synchronized
+    private fun onAirPlayRegistrationFailed(generation: Long, errorCode: Int) {
+        if (!isStarted || generation != registrationGeneration) return
+        Logger.e("Essential AirPlay mDNS registration failed, errorCode=$errorCode")
+        stopInternal(notifyDisabled = false)
+        onStateChange(ProtocolState.ERROR)
+    }
+
+    /** RAOP is ancillary; failure must not tear down a working AirPlay advertisement. */
+    @Synchronized
+    private fun onRaopRegistrationFailed(generation: Long, errorCode: Int) {
+        if (!isStarted || generation != registrationGeneration) return
+        raopRegistered = false
+        Logger.w("Ancillary RAOP mDNS registration failed, errorCode=$errorCode; continuing")
     }
 
     /**
@@ -254,33 +429,46 @@ class MdnsService(
      * @param onFailure        Called on [onRegistrationFailed].
      */
     private fun createRegistrationListener(
+        generation: Long,
         serviceLabel: String,
         onRegisteredName: ((String) -> Unit)?,
         onSuccess: () -> Unit,
-        onFailure: () -> Unit
+        onFailure: (Int) -> Unit
     ): NsdManager.RegistrationListener {
         return object : NsdManager.RegistrationListener {
 
             override fun onServiceRegistered(serviceInfo: NsdServiceInfo) {
-                // NsdManager may append " (2)" to resolve name conflicts.
-                // Log the actual name so we can debug picker-visibility issues.
-                Logger.i("mDNS registered: $serviceLabel as '${serviceInfo.serviceName}'")
-                onRegisteredName?.invoke(serviceInfo.serviceName)
-                onSuccess()
+                synchronized(this@MdnsService) {
+                    if (!isStarted || generation != registrationGeneration) {
+                        Logger.d("Ignoring stale mDNS success callback for $serviceLabel")
+                        return@synchronized
+                    }
+                    // NsdManager may append " (2)" to resolve name conflicts.
+                    // Log the actual name so we can debug picker-visibility issues.
+                    Logger.i("mDNS registered: $serviceLabel as '${serviceInfo.serviceName}'")
+                    onRegisteredName?.invoke(serviceInfo.serviceName)
+                    onSuccess()
+                }
             }
 
             override fun onRegistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
-                // Error codes from NsdManager:
-                //   FAILURE_ALREADY_ACTIVE (3) — already registered; treat as success
-                //   FAILURE_MAX_LIMIT (4)      — too many services (should not happen)
-                //   FAILURE_INTERNAL_ERROR (0) — system mDNS daemon issue
-                if (errorCode == NsdManager.FAILURE_ALREADY_ACTIVE) {
-                    Logger.w("mDNS $serviceLabel already active — treating as success")
-                    onSuccess()
-                } else {
-                    Logger.e("mDNS registration FAILED for $serviceLabel, errorCode=$errorCode")
-                    isStarted = false
-                    onFailure()
+                synchronized(this@MdnsService) {
+                    if (!isStarted || generation != registrationGeneration) {
+                        Logger.d("Ignoring stale mDNS failure callback for $serviceLabel")
+                        return@synchronized
+                    }
+                    // Error codes from NsdManager:
+                    //   FAILURE_ALREADY_ACTIVE (3) — already registered; treat as success
+                    //   FAILURE_MAX_LIMIT (4)      — too many services (should not happen)
+                    //   FAILURE_INTERNAL_ERROR (0) — system mDNS daemon issue
+                    if (errorCode == NsdManager.FAILURE_ALREADY_ACTIVE) {
+                        Logger.w("mDNS $serviceLabel already active — treating as success")
+                        onSuccess()
+                    } else {
+                        // AirPlay and RAOP deliberately have different failure policies. Delegate
+                        // teardown/state handling to the service-specific callback.
+                        onFailure(errorCode)
+                    }
                 }
             }
 
@@ -316,5 +504,13 @@ class MdnsService(
 
         /** AirPlay server version — matches a real Apple TV for maximum compatibility. */
         private const val AIRPLAY_SERVER_VERSION = "220.68"
+
+        private const val MULTICAST_LOCK_TAG = "PhairPlay:mDNS"
+
+        private const val REGISTRATION_TIMEOUT_MS = 8_000L
+
+        private const val AIRPLAY_NAME_SUFFIX = " AirPlay"
+
+        private const val MAX_MDNS_LABEL_CHARACTERS = 63
     }
 }

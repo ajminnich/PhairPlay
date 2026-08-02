@@ -31,7 +31,7 @@ import kotlinx.coroutines.launch
  *
  * HOW: Reads current settings from [SettingsRepository] and populates the UI.
  * Each toggle/row saves immediately when changed (no "Save" button needed).
- * Settings changes take effect on the next service restart.
+ * Receiver startup settings trigger a service restart so they take effect immediately.
  *
  * Navigation: accessed via the "Settings" item in MainActivity's nav panel.
  */
@@ -52,7 +52,6 @@ class SettingsFragment : Fragment() {
     private lateinit var textDisplayNameValue: TextView
     private lateinit var rowAirPlay: View
     private lateinit var rowMiracast: View
-    private lateinit var rowCast: View
     private lateinit var rowMirrorAudio: View
     private lateinit var rowPinAuth: View
     private lateinit var rowStartOnBoot: View
@@ -90,7 +89,6 @@ class SettingsFragment : Fragment() {
         textDisplayNameValue = view.findViewById(R.id.text_display_name_value)
         rowAirPlay          = view.findViewById(R.id.row_airplay)
         rowMiracast         = view.findViewById(R.id.row_miracast)
-        rowCast             = view.findViewById(R.id.row_cast)
         rowMirrorAudio      = view.findViewById(R.id.row_mirror_audio)
         rowPinAuth          = view.findViewById(R.id.row_pin_auth)
         rowStartOnBoot      = view.findViewById(R.id.row_start_on_boot)
@@ -114,7 +112,6 @@ class SettingsFragment : Fragment() {
     private fun setRowLabels() {
         configureToggleRow(rowAirPlay,      R.string.setting_airplay_enabled,    R.string.setting_airplay_subtitle)
         configureToggleRow(rowMiracast,     R.string.setting_miracast_enabled,   R.string.setting_miracast_subtitle)
-        configureToggleRow(rowCast,         R.string.setting_cast_enabled,       R.string.setting_cast_subtitle)
         configureToggleRow(rowMirrorAudio,  R.string.setting_mirror_audio,       R.string.setting_mirror_audio_subtitle)
         configureToggleRow(rowPinAuth,      R.string.setting_pin_auth,           R.string.setting_pin_auth_subtitle)
         configureToggleRow(rowStartOnBoot,  R.string.setting_start_on_boot,      0)
@@ -163,7 +160,6 @@ class SettingsFragment : Fragment() {
         }
         setToggle(rowAirPlay,      settings.airPlayEnabled)
         setToggle(rowMiracast,     settings.miracastEnabled)
-        setToggle(rowCast,         settings.castEnabled)
         setToggle(rowMirrorAudio,  settings.mirrorAudioEnabled)
         setToggle(rowPinAuth,      settings.airPlayPinAuthEnabled)
         setToggle(rowStartOnBoot,  settings.startOnBoot)
@@ -180,19 +176,18 @@ class SettingsFragment : Fragment() {
      * Each listener immediately persists the change via [SettingsRepository.update].
      *
      * No "Save" button is needed — settings are saved on every interaction.
-     * A restart prompt is shown after protocol-affecting changes.
+     * Receiver startup settings are saved and then applied with a service restart.
      */
     private fun setupListeners() {
         rowDisplayName.setOnClickListener { showDisplayNameDialog() }
 
-        setToggleListener(rowAirPlay)      { enabled -> save { it.copy(airPlayEnabled = enabled) } }
-        setToggleListener(rowMiracast)     { enabled -> save { it.copy(miracastEnabled = enabled) } }
-        setToggleListener(rowCast)         { enabled -> save { it.copy(castEnabled = enabled) } }
+        setToggleListener(rowAirPlay)      { enabled -> saveAndRestart { it.copy(airPlayEnabled = enabled) } }
+        setToggleListener(rowMiracast)     { enabled -> saveAndRestart { it.copy(miracastEnabled = enabled) } }
         setToggleListener(rowMirrorAudio)  { enabled -> saveAndRestart { it.copy(mirrorAudioEnabled = enabled) } }
         setToggleListener(rowPinAuth)      { enabled -> saveAndRestart { it.copy(airPlayPinAuthEnabled = enabled) } }
         setToggleListener(rowStartOnBoot)  { enabled -> save { it.copy(startOnBoot = enabled) } }
         setToggleListener(rowDebugOverlay) { enabled -> save { it.copy(showDebugOverlay = enabled) } }
-        setToggleListener(rowForceHighRes) { enabled -> save { it.copy(forceHighResolution = enabled) } }
+        setToggleListener(rowForceHighRes) { enabled -> saveAndRestart { it.copy(forceHighResolution = enabled) } }
 
         rowReset.setOnClickListener { resetSettings() }
     }
@@ -221,8 +216,8 @@ class SettingsFragment : Fragment() {
     }
 
     /**
-     * Saves a setting that the AirPlay receiver only reads at startup (mirror-audio, PIN auth), then
-     * restarts the service so the change applies immediately instead of on the next manual restart.
+     * Saves a setting read by a receiver at startup, then restarts the service so the
+     * change applies immediately instead of waiting for a later manual restart.
      */
     private fun saveAndRestart(transform: (AppSettings) -> AppSettings) {
         viewLifecycleOwner.lifecycleScope.launch {
@@ -270,14 +265,14 @@ class SettingsFragment : Fragment() {
             .setView(editText)
             .setPositiveButton(android.R.string.ok) { _, _ ->
                 val newName = editText.text?.toString()?.trim() ?: ""
-                save { it.copy(displayName = newName) }
+                saveAndRestart { it.copy(displayName = newName) }
                 textDisplayNameValue.text = newName.ifEmpty {
                     getString(R.string.setting_display_name_system_default)
                 }
                 Logger.i("Display name updated to: '${newName.ifEmpty { "(system default)" }}'")
             }
             .setNeutralButton(R.string.setting_display_name_reset) { _, _ ->
-                save { it.copy(displayName = "") }
+                saveAndRestart { it.copy(displayName = "") }
                 textDisplayNameValue.text = getString(R.string.setting_display_name_system_default)
                 Logger.i("Display name reset to system default")
             }

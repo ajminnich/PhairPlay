@@ -8,6 +8,7 @@ import com.phairplay.airplay.handshake.BufferedAudioServer
 import com.phairplay.airplay.handshake.MirrorStreamServer
 import com.phairplay.service.ProtocolState
 import com.phairplay.util.Logger
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -140,9 +141,11 @@ class AirPlayReceiver(
     /**
      * Starts the AirPlay receiver.
      *
-     * 1. Starts mDNS advertising with the configured display name.
-     * 2. Opens the RTSP server socket (port 7000).
-     * 3. Emits [ProtocolState.ADVERTISING] once both mDNS services are registered.
+     * 1. Opens and verifies the RTSP server socket (port 7000).
+     * 2. Starts mDNS advertising with the configured display name.
+     * 3. Emits [ProtocolState.ADVERTISING] once the picker-visible AirPlay mDNS service is
+     *    registered. RAOP is also submitted for audio discovery, but is best-effort on Android
+     *    TV builds whose NSD backend leaves the first back-to-back request pending.
      *
      * Non-blocking — all network work runs in background coroutines.
      */
@@ -151,10 +154,14 @@ class AirPlayReceiver(
         scope.launch {
             try {
                 startTimingHandler()
-                startMdnsService()
                 startRtspHandler()
+                startMdnsService()
+            } catch (e: CancellationException) {
+                cleanupFailedStartup()
+                throw e
             } catch (e: Exception) {
                 Logger.e("Failed to start AirPlayReceiver", e)
+                cleanupFailedStartup()
                 emitState(ProtocolState.ERROR)
             }
         }
@@ -209,8 +216,8 @@ class AirPlayReceiver(
         Logger.d("mDNS service started")
     }
 
-    private fun startRtspHandler() {
-        rtspHandler = RtspHandler(
+    private suspend fun startRtspHandler() {
+        val handler = RtspHandler(
             context = context,
             displayWidth = mirrorWidth,
             displayHeight = mirrorHeight,
@@ -247,8 +254,21 @@ class AirPlayReceiver(
             pinAuthEnabled = pinAuthEnabled,
             pairingStore = pairingStore,
             onShowPin = { pin -> onPinChanged(pin) }
-        ).also { it.start(scope) }
+        )
+        // Publish the handler before binding so a concurrent stop can interrupt its retry loop.
+        rtspHandler = handler
+        handler.start(scope)
         Logger.i("RTSP handler started on port 7000 (audioEnabled=$audioEnabled pinAuth=$pinAuthEnabled)")
+    }
+
+    /** Releases components that may have started before a later startup phase failed. */
+    private fun cleanupFailedStartup() {
+        runCatching { mdnsService?.stop() }
+            .onFailure { Logger.e("mDNS cleanup after startup failure failed", it) }
+        runCatching { rtspHandler?.stop() }
+            .onFailure { Logger.e("RTSP cleanup after startup failure failed", it) }
+        runCatching { timingHandler?.stop() }
+            .onFailure { Logger.e("Timing cleanup after startup failure failed", it) }
     }
 
     // ─── Private: streaming lifecycle ────────────────────────────────────────

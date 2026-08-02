@@ -23,7 +23,7 @@ data class AppSettings(
 
     // ─── Display ───────────────────────────────────────────────────────────
     /**
-     * The name shown in sender pickers (AirPlay menu on Mac, Cast picker in Chrome, etc.).
+     * The name shown in sender pickers (for example, the AirPlay menu on a Mac).
      * If empty, the Android device name is used as a fallback.
      * Validated: max 63 characters, must not be blank after trimming.
      */
@@ -41,13 +41,6 @@ data class AppSettings(
      * When false: Wi-Fi P2P service advertisement is stopped.
      */
     val miracastEnabled: Boolean = true,
-
-    /**
-     * Whether the Google Cast receiver is enabled.
-     * On Fire TV (no Google Play Services), this is ignored.
-     * When false: Cast SDK is not initialized.
-     */
-    val castEnabled: Boolean = true,
 
     // ─── AirPlay specific ──────────────────────────────────────────────────
     /**
@@ -106,10 +99,10 @@ data class AppSettings(
 
     /**
      * Returns true if at least one protocol is enabled.
-     * If all three are disabled, the service has nothing to do.
+     * If both are disabled, the service has nothing to do.
      */
     val anyProtocolEnabled: Boolean
-        get() = airPlayEnabled || miracastEnabled || castEnabled
+        get() = airPlayEnabled || miracastEnabled
 
     companion object {
         /** The default settings instance used on first launch. */

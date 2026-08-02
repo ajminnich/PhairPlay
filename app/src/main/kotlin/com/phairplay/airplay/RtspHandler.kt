@@ -10,7 +10,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.OutputStream
+import java.io.IOException
 import java.net.ServerSocket
 import java.net.Socket
 
@@ -87,6 +89,7 @@ open class RtspHandler(
     /** Last volume the sender set (AirPlay dB); returned to GET_PARAMETER volume queries. */
     @Volatile private var currentVolume: Float = 0f
 
+    private val lifecycleLock = Any()
     private var serverSocket: ServerSocket? = null
 
     @Volatile
@@ -135,25 +138,60 @@ open class RtspHandler(
     @Volatile
     var onVideoNalUnit: ((nalUnit: ByteArray, ptsUs: Long) -> Unit)? = null
 
-    /** Starts the RTSP server. */
-    fun start(scope: CoroutineScope) {
-        running = true
+    /**
+     * Starts the RTSP server and returns only after port 7000 is bound.
+     *
+     * Binding is completed before the accept loop is launched so callers can safely publish the
+     * mDNS advertisement only after the advertised endpoint is reachable. Bind failures propagate
+     * to the caller instead of being hidden inside a background coroutine.
+     */
+    suspend fun start(scope: CoroutineScope) {
+        synchronized(lifecycleLock) {
+            if (running) return
+            running = true
+        }
+
+        val boundSocket = try {
+            withContext(Dispatchers.IO) { bindRtspSocket() }
+        } catch (e: Exception) {
+            synchronized(lifecycleLock) { running = false }
+            throw e
+        }
+
+        val publishSocket = synchronized(lifecycleLock) {
+            if (!running) {
+                false
+            } else {
+                serverSocket = boundSocket
+                true
+            }
+        }
+        if (!publishSocket) {
+            runCatching { boundSocket.close() }
+            throw IOException("RTSP server stopped during bind")
+        }
+
+        Logger.i("RTSP server listening on port $RTSP_PORT")
         scope.launch(Dispatchers.IO) {
-            runServer(this)
+            runServer(this, boundSocket)
         }
     }
 
     /** Stops the RTSP server. */
     fun stop() {
-        running = false
+        val sockets = synchronized(lifecycleLock) {
+            running = false
+            val current = activeClient to serverSocket
+            activeClient = null
+            serverSocket = null
+            current
+        }
         try {
-            activeClient?.close()
-            serverSocket?.close()
+            sockets.first?.close()
+            sockets.second?.close()
         } catch (e: Exception) {
             Logger.e("Error closing RTSP sockets (non-fatal)", e)
         }
-        activeClient = null
-        serverSocket = null
         Logger.i("RTSP handler stopped")
     }
 
@@ -164,7 +202,7 @@ open class RtspHandler(
      * was dead — macOS would discover it and try to mirror but nothing could connect ("casting but
      * nothing shows"). SO_REUSEADDR handles TIME_WAIT; the retry covers the close/rebind race.
      */
-    private fun bindRtspSocket(): ServerSocket {
+    protected open fun bindRtspSocket(): ServerSocket {
         var lastError: java.io.IOException? = null
         repeat(BIND_MAX_ATTEMPTS) { attempt ->
             if (!running) throw java.io.IOException("RTSP server stopped before bind")
@@ -182,13 +220,10 @@ open class RtspHandler(
         throw lastError ?: java.io.IOException("RTSP bind to $RTSP_PORT failed")
     }
 
-    private fun runServer(scope: CoroutineScope) {
+    private fun runServer(scope: CoroutineScope, boundSocket: ServerSocket) {
         try {
-            serverSocket = bindRtspSocket()
-            Logger.i("RTSP server listening on port $RTSP_PORT")
-
             while (running && scope.isActive) {
-                val clientSocket = serverSocket!!.accept()
+                val clientSocket = boundSocket.accept()
                 Logger.i("New client connected: ${clientSocket.inetAddress.hostAddress}")
 
                 if (activeClient != null && !activeClient!!.isClosed) {
@@ -207,6 +242,11 @@ open class RtspHandler(
             } else {
                 Logger.d("RTSP server socket closed (expected during shutdown)")
             }
+        } finally {
+            synchronized(lifecycleLock) {
+                if (serverSocket === boundSocket) serverSocket = null
+            }
+            runCatching { boundSocket.close() }
         }
     }
 
@@ -302,7 +342,7 @@ open class RtspHandler(
 
     /** Routes AirPlay 2 GET requests by URI path. */
     private fun routeGet(request: RtspRequest): RtspResponse = when (request.uri.substringBefore("?")) {
-        "/info"          -> handleInfo(request)
+        "/info"          -> handleInfoInternal(request)
         "/playback-info" -> handlePlaybackInfo(request)
         "/scrub"         -> handleScrubGet(request)
         "/server-info"   -> handleServerInfo(request)
@@ -421,7 +461,7 @@ open class RtspHandler(
     /** GET /server-info — legacy XML plist of receiver identity for AirPlay video senders. */
     private fun handleServerInfo(request: RtspRequest): RtspResponse {
         val info = mapOf(
-            "deviceid" to com.phairplay.util.NetworkUtils.getMacAddress(),
+            "deviceid" to com.phairplay.util.NetworkUtils.getMacAddress(context),
             "features" to 0x1E5A7FFFF7L,
             "model" to "AppleTV5,3",
             "protovers" to "1.1",
@@ -472,11 +512,17 @@ open class RtspHandler(
         return RtspResponse(200, "OK", protocol = request.responseProtocol())
     }
 
-    /** GET /info — advertises receiver identity + capabilities (binary plist). */
-    private fun handleInfo(request: RtspRequest): RtspResponse = RtspResponse(
+    /** GET /info — returns requested DNS-SD TXT data or the full receiver-info binary plist. */
+    protected open fun handleInfoInternal(request: RtspRequest): RtspResponse = RtspResponse(
         statusCode = 200,
         statusMessage = "OK",
-        bodyBytes = InfoResponder.build(context, displayWidth, displayHeight, pinRequired = pinAuthEnabled),
+        bodyBytes = InfoResponder.buildForRequest(
+            context = context,
+            requestBody = request.bodyBytes,
+            width = displayWidth,
+            height = displayHeight,
+            pinRequired = pinAuthEnabled
+        ),
         contentType = "application/x-apple-binary-plist",
         protocol = request.responseProtocol()
     )

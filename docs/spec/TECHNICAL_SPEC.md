@@ -1,4 +1,8 @@
-# PhairPlay – Technical Specification
+# PhairPlay — Technical Specification
+
+> **Scope update (2026-08-01):** PhairPlay's custom Google Cast receiver was removed. Google TV's
+> built-in Chromecast receiver remains independent of this app. Cast-related design material
+> below is retained only as historical context and does not describe the current build.
 
 Version: 1.2
 Status: Active

@@ -1,7 +1,11 @@
 # ADR-001: Multi-Protocol Support (AirPlay + Miracast + Cast)
 
 **Date:** 2026-03-23
-**Status:** Accepted
+**Status:** Superseded on 2026-08-01
+
+> The Google Cast portion of this decision was retired. PhairPlay now implements AirPlay and
+> Miracast only. Google TV's built-in Chromecast receiver remains a separate system feature.
+> The original decision text below is retained as project history.
 
 ---
 

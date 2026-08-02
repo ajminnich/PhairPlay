@@ -1,8 +1,8 @@
 # PhairPlay – Requirements
 
-Version: 2.2
+Version: 2.3
 Status: Active
-Date: 2026-03-23
+Date: 2026-08-01
 
 ---
 
@@ -12,8 +12,7 @@ Date: 2026-03-23
 
 - FR-01: The app MUST advertise an AirPlay 2 receiver via mDNS (`_airplay._tcp`, `_raop._tcp`).
 - FR-02: The app MUST advertise a Miracast receiver via Wi-Fi Direct (P2P) service discovery.
-- FR-03: The app MUST optionally advertise a Google Cast receiver (if Cast SDK is registered).
-- FR-04: All three services can be enabled/disabled independently in Settings.
+- FR-04: Both receiver services can be enabled/disabled independently in Settings.
 - FR-05: The device name shown in sender pickers MUST be configurable in Settings (defaults to Android device name).
 - FR-06: All services start advertising within 2 seconds of app or service launch.
 - FR-07: All services stop advertising within 5 seconds of being disabled or app close.
@@ -65,27 +64,6 @@ Date: 2026-03-23
 | Max Resolution (Optional) | 4K UHD @ 60fps | Optional | Only on hardware that supports it |
 | DRM / Copy Protection | HDCP 2.x (hardware-based link protection) | **Required** | Negotiated during WFD setup |
 
-### 1.4 Google Cast Receiver
-
-- FR-19: Run as a Cast Custom Receiver application registered with the Google Cast SDK.
-- FR-20: Accept Cast connections from Chrome/Android/macOS/iOS senders.
-- FR-21: Support Cast screen mirroring from Chrome and Android senders.
-- FR-22: Display Cast status on the HomeScreen status card.
-- FR-23: Gracefully degrade if the Cast SDK is unavailable (missing Google Play Services on Fire TV).
-
-#### Google Cast Codec Requirements
-
-| Category | Codec / Format | Status | Notes |
-|---|---|---|---|
-| Video (Mandatory) | H.264 AVC (Baseline, Main, High Profile); VP8 | **Required** | Cast baseline codecs |
-| Video (Optional / 4K) | H.265 HEVC, VP9, AV1 | Optional | Newer hardware (Android TV API 31+ for AV1) |
-| Audio (Mandatory) | AAC-LC, AAC-HE, MP3, WAV (LPCM) | **Required** | Cast baseline audio |
-| Audio (Surround – Optional) | Dolby Digital Plus (E-AC3), Dolby Atmos, Opus, FLAC | Optional | High-quality audio on capable devices |
-| Container | MP4, WebM | **Required** | Native Cast containers |
-| Container (Adaptive) | DASH (Dynamic Adaptive Streaming over HTTP), HLS | **Required** | For adaptive bitrate streaming |
-| Max Resolution | Up to 4K UHD @ 60fps (HDR10+) | Optional | 1080p mandatory, 4K hardware-dependent |
-| DRM | Widevine L1 / L3, PlayReady | **Required** | For DRM-protected content streams |
-
 ### 1.5 Service Control
 
 - FR-24: The user MUST be able to **start**, **stop**, and **restart** all receiver services from the app UI.
@@ -106,7 +84,6 @@ Date: 2026-03-23
 | Display name | Android device name | Name shown in sender pickers |
 | AirPlay enabled | ON | Enable/disable AirPlay service |
 | Miracast enabled | ON | Enable/disable Miracast service |
-| Cast enabled | ON | Enable/disable Cast service |
 | AirPlay PIN auth | OFF | Require PIN for AirPlay connections |
 | Start on boot | OFF | Auto-start service on device boot |
 | Show debug overlay | OFF | Show FPS / latency overlay (dev) |
@@ -116,7 +93,6 @@ Date: 2026-03-23
 - FR-33: Decode video using hardware `MediaCodec`. Supported codecs per protocol:
   - **AirPlay**: H.264 AVC (mandatory, up to High Profile Level 5.2); H.265 HEVC (optional, hardware check required).
   - **Miracast**: H.264 AVC CHP/CBP (mandatory); H.265 HEVC (optional).
-  - **Google Cast**: H.264 AVC + VP8 (mandatory); H.265 HEVC, VP9, AV1 (optional, API-level gated).
   - Software fallback is NOT used; if hardware decoder is unavailable, the stream is rejected gracefully.
 - FR-34: Display decoded video full-screen maintaining aspect ratio.
 - FR-35: Play audio in sync with video (A/V drift ≤ 40ms).
@@ -161,7 +137,6 @@ Date: 2026-03-23
 - NFR-17: AirPlay sender (screen mirroring): macOS 12+, iOS/iPadOS 13+.
 - NFR-18: AirPlay sender (audio-only): macOS 12+, iOS/iPadOS 13+.
 - NFR-19: Miracast sender: Windows 10+, Android 4.2+.
-- NFR-20: Cast sender: Chrome 72+, Android 5+.
 
 ### 2.5 Code Quality
 - NFR-23: No source file exceeds 400 lines.
@@ -182,7 +157,6 @@ Date: 2026-03-23
 | Screen recording to file | Privacy concern | Not planned |
 | H.265 / HEVC decode (AirPlay) | Optional, hardware-gated | v2 optional (API check required) |
 | H.265 / HEVC decode (Miracast) | Optional, hardware-gated | v2 optional |
-| VP9 / AV1 decode (Cast) | Optional, API level gated (API 31+ for AV1) | v2 optional |
 | Dolby Atmos / AC-3 decode | Optional surround audio | v2 optional |
 | AirPlay audio grouping (multi-room) | Requires full AirPlay 2 stack | v3 roadmap |
 | 4K UHD streams (AirPlay, Miracast) | Optional, hardware-dependent | v2 optional |
@@ -206,7 +180,7 @@ Date: 2026-03-23
 
 > **Note on open codecs:** H.265 HEVC, VP9, and AV1 are fully implementable on Android via `MediaCodec` with hardware support checks. These are planned as optional features in v2 behind `MediaCodecInfo.CodecCapabilities` capability queries at runtime.
 
-> **Note on HDCP and Widevine/PlayReady:** HDCP (for Miracast) is negotiated at the WFD protocol level and enforced by hardware — no software implementation is needed. Widevine and PlayReady (for Cast) are handled by the Google Cast SDK and the Android DRM framework (`MediaDrm`) — the app does not need to implement DRM logic directly.
+> **Note on HDCP:** HDCP (for Miracast) is negotiated at the WFD protocol level and enforced by hardware — no software implementation is needed.
 
 ---
 
@@ -226,5 +200,6 @@ Date: 2026-03-23
 | AirPlay 2 | iOS / iPadOS | 13+ | Screen mirroring + audio-only |
 | Miracast | Windows | 10+ | Screen mirroring |
 | Miracast | Android | 4.2+ | Screen mirroring |
-| Google Cast | Chrome browser | 72+ | Tab/screen cast |
-| Google Cast | Android | 5+ | Screen cast |
+
+Google TV's built-in Chromecast receiver is a platform capability, not a PhairPlay receiver,
+and remains outside this app's requirements and lifecycle.

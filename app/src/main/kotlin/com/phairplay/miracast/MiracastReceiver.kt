@@ -22,17 +22,18 @@ import java.net.ServerSocket
 import java.net.Socket
 
 /**
- * MiracastReceiver — Miracast (Wi-Fi Display / WFD) receiver service advertiser.
+ * MiracastReceiver — experimental Miracast (Wi-Fi Display / WFD) groundwork.
  *
  * WHY: Miracast allows Windows 10+ and Android devices to wirelessly mirror
  * their screen without being on the same Wi-Fi network. It uses Wi-Fi Direct
  * (P2P) to create a direct device-to-device connection.
  *
- * HOW: Implementation proceeds in phases:
- * - Phase 1: Architecture defined, P2P manager initialized
- * - Phase 2: Wi-Fi P2P service discovery advertised
- * - WFD RTSP session negotiation
- * - Phase 4 (M6): H.264 video decode + audio playback
+ * IMPORTANT: A Wi-Fi Direct DNS-SD service is not a Wi-Fi Display advertisement.
+ * Standard senders discover a sink from WFD information elements. Android exposes
+ * those through WifiP2pManager.setWfdInfo(), which requires the signature-level
+ * CONFIGURE_WIFI_DISPLAY permission. A normal sideloaded APK cannot obtain it.
+ * This class retains RTSP groundwork for future system/OEM-integrated builds, but
+ * must not advertise itself as a functional Miracast receiver in the current build.
  *
  * Miracast protocol stack:
  *   Wi-Fi Direct (P2P) → WFD RTSP → RTP/H.264 → MediaCodec → SurfaceView
@@ -50,8 +51,8 @@ import java.net.Socket
  *
  * Example:
  *   val receiver = MiracastReceiver(context) { state -> updateUI(state) }
- *   receiver.start()  // begins P2P service advertisement
- *   receiver.stop()   // stops advertisement and closes session
+ *   receiver.start()  // reports unavailable in a normal application build
+ *   receiver.stop()   // closes any retained experimental resources
  */
 class MiracastReceiver(
     private val context: Context,
@@ -87,15 +88,17 @@ class MiracastReceiver(
     /**
      * Starts the Miracast receiver.
      *
-     * Current implementation:
-     * - Initializes the WifiP2pManager and Channel
-     * - Logs availability of Wi-Fi Direct on this device
-     * - Registers a local Wi-Fi Direct DNS-SD WFD service
-     * - Opens the WFD RTSP control server on port 7236
+     * The app deliberately fails closed here. Registering `_wfd._tcp` with
+     * [WifiP2pManager.addLocalService] only creates an application Bonjour record;
+     * it does not make this device appear as a Wi-Fi Display sink to Windows.
      */
     fun start() {
-        Logger.i("MiracastReceiver starting")
-        initializeWifiP2p()
+        Logger.w(
+            "Miracast receiver unavailable: app-level Wi-Fi Direct DNS-SD/RTSP " +
+                "does not provide the WFD device advertisement required by standard senders; " +
+                "Android requires system/OEM Wi-Fi Display integration"
+        )
+        onStateChanged(ProtocolState.ERROR)
     }
 
     /**
@@ -189,11 +192,11 @@ class MiracastReceiver(
     }
 
     /**
-     * Registers the WFD local service record used by Wi-Fi Direct discovery.
+     * Registers an experimental local service record for Wi-Fi Direct service discovery.
      *
-     * Android exposes Wi-Fi Direct service discovery through DNS-SD TXT records.
-     * Miracast senders look for `_wfd._tcp` and then continue with WFD capability
-     * negotiation over RTSP after the P2P group is formed.
+     * This is retained as protocol-development groundwork only. It is not invoked by
+     * [start], because Windows Miracast discovery does not treat an application
+     * Bonjour `_wfd._tcp` record as the WFD information element of a display sink.
      */
     private fun registerP2pService() {
         val manager = wifiP2pManager

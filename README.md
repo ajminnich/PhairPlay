@@ -22,7 +22,9 @@ PhairPlay's AirPlay 2 receiver is fully implemented and available as a signed be
 
 The AirPlay 2 stack is complete end-to-end: mDNS advertising, RTSP handshake, HomeKit-style pairing, FairPlay key decryption, H.264 mirroring, AAC-ELD/AAC-LC/ALAC audio, NTP A/V sync, and DACP reverse remote. Real-device validation with macOS and iOS senders is the current focus.
 
-Miracast and Google Cast receiver stacks are in progress (control-plane implemented; media playback pending).
+The Miracast receiver stack is in progress (control-plane implemented; media playback pending).
+PhairPlay does not replace Google TV's built-in Chromecast receiver; that system feature continues
+to work independently of this app.
 
 ## Features
 
@@ -44,7 +46,6 @@ Miracast and Google Cast receiver stacks are in progress (control-plane implemen
 - Mirror audio toggle and PIN-auth toggle in Settings
 - Works on Google TV (Android 10+) and Fire TV (Android 7+)
 - Miracast Wi-Fi Direct / WFD advertisement and RTSP control-plane
-- Google TV Cast Connect SDK lifecycle (full testing requires Cast app ID)
 - Zero ads, zero analytics, zero internet required
 - Open source — Apache 2.0 license
 
@@ -54,7 +55,7 @@ Miracast and Google Cast receiver stacks are in progress (control-plane implemen
 - **Apple Music in-app audio** — protected on every AirPlay path; use system audio output instead
 - **Buffered audio playback** (AirPlay 2 type 103) — accepted but not played back yet
 - **Cloud/remote streaming** — local network only
-- **Miracast / Cast media playback** — control plane is ready; media decode integration is in progress
+- **Miracast media playback** — the control plane is ready; media decode integration is in progress
 
 ---
 
@@ -107,9 +108,6 @@ Then install it via ADB (see the Sideloading Guide below) or a sideloading app l
    ```bash
    # For Google TV:
    ./gradlew assembleGoogletvDebug
-
-   # Google TV with a registered Cast App ID:
-   ./gradlew assembleGoogletvDebug -Pphairplay.castAppId=<APP_ID>
 
    # For Fire TV:
    ./gradlew assembleFiretvDebug
@@ -183,7 +181,7 @@ Then install it via ADB (see the Sideloading Guide below) or a sideloading app l
 - **Apple Music in-app audio is not decryptable.** macOS protects it with FairPlay on every AirPlay path. Route the Mac's system audio output instead (works fine).
 - **FairPlay-protected video** (Netflix, Disney+, Apple TV+) cannot be mirrored — this is Apple's DRM, not a PhairPlay limitation.
 - **Buffered audio (AirPlay 2 type 103)** is accepted but not yet played back.
-- **Google Cast** requires a registered Cast app ID for end-to-end testing; see [docs/guides/CAST_APP_ID.md](docs/guides/CAST_APP_ID.md).
+- **Chromecast is not implemented by PhairPlay.** On Google TV devices, use the platform's built-in Chromecast receiver; removing PhairPlay does not remove or disable it.
 - **Miracast** — Wi-Fi Direct and RTSP control plane work; MPEG-TS media decode is future work.
 - If your router has **AP isolation** or **multicast filtering** enabled, PhairPlay may not appear in the AirPlay menu. Disable these settings on your router.
 - On very busy 2.4 GHz Wi-Fi networks, you may experience latency above 100 ms. Use 5 GHz or Ethernet for best results.

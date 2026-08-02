@@ -11,14 +11,6 @@ plugins {
     alias(libs.plugins.kotlin.android)
 }
 
-fun String.escapedForBuildConfig(): String =
-    replace("\\", "\\\\").replace("\"", "\\\"")
-
-val castAppId: String =
-    (providers.gradleProperty("phairplay.castAppId").orNull
-        ?: providers.environmentVariable("PHAIRPLAY_CAST_APP_ID").orNull
-        ?: "").trim()
-
 android {
     namespace = "com.phairplay"
     compileSdk = 35
@@ -32,8 +24,6 @@ android {
         versionName = "1.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        buildConfigField("String", "CAST_APP_ID", "\"${castAppId.escapedForBuildConfig()}\"")
-
         // Native FairPlay (libplayfair.so) — build for all Android ABIs so PhairPlay runs on
         // the full range of Android TV / Fire TV hardware (32- and 64-bit ARM, plus x86/x86_64
         // for Intel devices, ChromeOS, and emulators). Required for Google Play 64-bit compliance.
@@ -138,10 +128,7 @@ android {
         abortOnError = true
         checkReleaseBuilds = true
         warningsAsErrors = true
-        // Keep lint focused on PhairPlay sources. The Google Cast SDK pulls a
-        // large transitive graph that exceeds the small CI/dev VM during
-        // dependency lint analysis, while app-source lint still catches local
-        // manifest/resource/API regressions.
+        // Keep lint focused on PhairPlay sources and local manifest/resource/API regressions.
         checkDependencies = false
         disable += setOf(
             // Dependency freshness is tracked intentionally, but should not block
@@ -218,10 +205,6 @@ dependencies {
 
     // Binary property lists — AirPlay 2 handshake payloads (GET /info, SETUP)
     implementation(libs.ddplist)
-
-    // Google TV Cast Connect receiver SDK. Kept out of the Fire TV flavor because
-    // Fire TV lacks Google Play Services and cannot run Google Cast receiver APIs.
-    "googletvImplementation"(libs.play.services.cast.tv)
 
     // Unit Testing
     testImplementation(libs.junit)

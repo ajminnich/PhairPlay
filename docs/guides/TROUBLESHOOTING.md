@@ -2,7 +2,7 @@
 
 ---
 
-## Device not appearing in AirPlay / Miracast / Cast menu
+## Device not appearing in AirPlay / Miracast menu
 
 **Cause 1: Not on the same network**
 - Ensure your Mac/PC and the TV are connected to the **same Wi-Fi network** (same router, same subnet).
@@ -64,11 +64,11 @@
 
 ---
 
-## Cast not available on Fire TV
+## Chromecast
 
-Google Cast requires Google Play Services, which is not available on Amazon Fire TV.
-The Cast toggle in Settings will be automatically hidden on Fire TV devices.
-This is by design and cannot be changed.
+PhairPlay does not implement or manage a Google Cast receiver. On Google TV devices such as the
+onn 4K Plus, Chromecast is a built-in system feature and continues working independently of
+PhairPlay. Fire TV does not include Google's built-in Chromecast receiver.
 
 ---
 

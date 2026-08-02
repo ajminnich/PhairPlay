@@ -5,6 +5,7 @@ import android.net.wifi.WifiManager
 import android.provider.Settings
 import timber.log.Timber
 import java.net.NetworkInterface
+import java.security.SecureRandom
 import java.util.UUID
 
 /**
@@ -58,33 +59,61 @@ object NetworkUtils {
      * The MAC address is used as the `deviceid` in AirPlay mDNS TXT records.
      * It uniquely identifies this receiver to macOS senders.
      *
-     * Tries Wi-Fi first (most TVs are Wi-Fi), then falls back to any available
-     * non-loopback interface, then uses a fake address as last resort.
+     * Tries Wi-Fi/Ethernet first, then falls back to another usable non-loopback
+     * interface. When Android hides every hardware address, a locally administered
+     * address is generated once and persisted in app-private storage.
      *
      * NOTE: On Android 10+, direct MAC access is restricted. We use NetworkInterface
      * instead of WifiManager.getConnectionInfo() which is deprecated.
      *
+     * @param context Optional context used to persist a stable fallback. Production
+     *   callers provide it; the no-context form remains useful for JVM tests.
      * @return MAC address in "aa:bb:cc:dd:ee:ff" format (lowercase, colon-separated).
      */
-    fun getMacAddress(): String {
+    @Synchronized
+    fun getMacAddress(context: Context? = null): String {
         return try {
-            // Iterate all network interfaces to find the Wi-Fi or Ethernet interface
             val interfaces = NetworkInterface.getNetworkInterfaces()?.toList() ?: emptyList()
+            val usable = interfaces.filter { iface ->
+                !iface.isLoopback && iface.isUp && isUsableHardwareAddress(iface.hardwareAddress)
+            }
+            val preferred = usable.firstOrNull { iface ->
+                iface.name.startsWith("wlan", ignoreCase = true) ||
+                    iface.name.startsWith("eth", ignoreCase = true)
+            } ?: usable.firstOrNull()
 
-            val mac = interfaces
-                .filter { !it.isLoopback && it.isUp && it.hardwareAddress != null }
-                .mapNotNull { iface ->
-                    iface.hardwareAddress?.let { hwAddr ->
-                        hwAddr.joinToString(":") { byte -> "%02x".format(byte) }
-                    }
-                }
-                .firstOrNull()
-
-            mac ?: FALLBACK_MAC_ADDRESS
+            preferred?.hardwareAddress?.let(::formatMacAddress)
+                ?: context?.let(::getOrCreateFallbackMacAddress)
+                ?: FALLBACK_MAC_ADDRESS
         } catch (e: Exception) {
             Timber.w(e, "Could not read MAC address — using fallback")
-            FALLBACK_MAC_ADDRESS
+            context?.let(::getOrCreateFallbackMacAddress) ?: FALLBACK_MAC_ADDRESS
         }
+    }
+
+    private fun isUsableHardwareAddress(address: ByteArray?): Boolean {
+        if (address == null || address.size != MAC_ADDRESS_BYTES) return false
+        if (address.all { it == 0.toByte() }) return false
+        // Android's privacy placeholder is identical on unrelated devices.
+        return !address.contentEquals(byteArrayOf(0x02, 0x00, 0x00, 0x00, 0x00, 0x00))
+    }
+
+    private fun formatMacAddress(address: ByteArray): String =
+        address.joinToString(":") { byte -> "%02x".format(byte.toInt() and 0xff) }
+
+    private fun getOrCreateFallbackMacAddress(context: Context): String {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.getString(PREF_KEY_FALLBACK_MAC, null)
+            ?.lowercase()
+            ?.takeIf { it.matches(MAC_ADDRESS_REGEX) }
+            ?.let { return it }
+
+        val address = ByteArray(MAC_ADDRESS_BYTES).also { SecureRandom().nextBytes(it) }
+        // IEEE locally administered (bit 1 set), unicast (bit 0 clear).
+        address[0] = ((address[0].toInt() and 0xfc) or 0x02).toByte()
+        val generated = formatMacAddress(address)
+        prefs.edit().putString(PREF_KEY_FALLBACK_MAC, generated).apply()
+        return generated
     }
 
     /**
@@ -127,4 +156,7 @@ object NetworkUtils {
     private const val FALLBACK_MAC_ADDRESS = "aa:bb:cc:dd:ee:ff"
     private const val PREFS_NAME = "phairplay_prefs"
     private const val PREF_KEY_DEVICE_UUID = "phairplay_device_uuid"
+    private const val PREF_KEY_FALLBACK_MAC = "phairplay_fallback_mac"
+    private const val MAC_ADDRESS_BYTES = 6
+    private val MAC_ADDRESS_REGEX = Regex("[0-9a-f]{2}(:[0-9a-f]{2}){5}")
 }
